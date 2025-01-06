@@ -1,222 +1,332 @@
 from collections import Counter
 from functools import reduce
 from itertools import combinations
+from copy import deepcopy
 
 class TreeNode:
     def __init__(self, item_name, count=1, parent=None):
         self.item_name = item_name  
         self.count = count          
-        self.parent = parent        # 父节点
-        self.children = {}          # 子节点字典 {item_name: TreeNode}
-        self.node_link = None       # 相同项节点链接
+        self.parent = parent        # parent node
+        self.children = {}          # child nodes {item_name: TreeNode}
+        self.node_link = None       # node link to next same item node
 
 class HeaderTable:
     def __init__(self):
         self.header_table = {}  # {item_name: [support_count, node_link]}
-        self.item_order = {}    # 存储初始FP树中1频繁项集的初始顺序
+        self.item_order = {}    # store the order of frequent items in initial FP-tree
 
-    # FP树新加节点时，更新header_table的链表        
     def add_node_link(self, item_name, node):
-        if item_name not in self.header_table:
-            self.header_table[item_name] = [0, None]
+        """Update node links in header_table when adding new node to FP-tree"""
 
         if self.header_table[item_name][1] is None:
             self.header_table[item_name][1] = node
         else:
-            # 遍历到最后一个节点
+            # traverse to the last node
             current = self.header_table[item_name][1]
             while current.node_link:
                 current = current.node_link
             current.node_link = node
 
-    # 初始化header_table时，保存当前FP子树的1频繁项集的支持度
     def increment_support(self, item_name, count=1):
+        """Initialize header_table with support counts of frequent items"""
         if item_name not in self.header_table:
             self.header_table[item_name] = [0, None]
         self.header_table[item_name][0] += count
 
 class FPTree:
     def __init__(self):
-        self.root = TreeNode("null", 0)  # 创建根节点
+        self.root = TreeNode("null", 0)  # create root node
         self.header_table = HeaderTable()
         
     def insert_tree(self, transaction, parent_node, count=1):
+        """Insert a transaction into FP-tree"""
         if not transaction:
             return
             
-        item = transaction[0]  # 获取第一个项
+        item = transaction[0]  # get first item
         
-        # 检查是否已存在该子节点
+        # check if child node exists
         if item in parent_node.children:
-            # 如果存在节点，只更新计数
+            # if exists, increment count
             parent_node.children[item].count += count
         else:
-            # 创建新节点
+            # create new node
             new_node = TreeNode(item, count, parent_node)
             parent_node.children[item] = new_node
-            # 更新header_table的链表
+            # update node link in header_table
             self.header_table.add_node_link(item, new_node)
             
-        # 递归把剩余事务插入到FP树
+        # recursively insert remaining items
         if len(transaction) > 1:
             self.insert_tree(transaction[1:], parent_node.children[item], count)
             
-    # 只在构建初始FP树时调用
-    # FP频繁子树是由后续的frequent pattern base频繁模式基构建的
     def create_tree(self, transactions, min_sup):
-        # 第一次扫描:计数频繁1项集
-        # reduce把所有事务合并成一个列表，Counter计数每个项的出现次数
+        """
+        Construct initial FP-tree with two scans of transaction database
+        Note: Conditional FP-trees are built from conditional pattern bases later
+        """
+        # First scan: count frequent items
+        # reduce merges all transactions, Counter counts frequency of each item
         item_counts = Counter(reduce(lambda x, y: x + y, transactions))
                 
-        # 过滤非频繁项并按支持度降序排序
+        # filter infrequent items and sort by support count in descending order
         frequent_items = {k: v for k, v in sorted(
             [(k,v) for k,v in item_counts.items() if v >= min_sup],
             key=lambda x: (-x[1], x[0])
         )}
         
-        # 保存初始FP树中1频繁项集的初始顺序
+        # store order of frequent items in initial FP-tree
         for i, item in enumerate(frequent_items.keys()):
             self.header_table.item_order[item] = i
         
-        # 初始化header_table
-        # 添加header_table支持度 链表为空
+        # initialize header_table with support counts
         for item, count in frequent_items.items():
             self.header_table.increment_support(item, count)
             
-        # 第二次扫描:构建FP树
+        # Second scan: construct FP-tree
         for transaction in transactions:
-            # 重新排列每条事务
-            # 过滤非频繁项并按header_table的顺序降序排列
+            # reorder items in transaction
+            # filter infrequent items and sort by support count
             frequent_trans = [item for item in transaction if item in frequent_items]
             frequent_trans.sort(key=lambda x: (-frequent_items[x], x))
             
-            # 插入重排后的事务，构建初始FP树
+            # insert ordered transaction into FP-tree
             if frequent_trans:
                 self.insert_tree(frequent_trans, self.root)
-                
-    def has_single_path(self):
-        # 判断频繁子树是否为单一路径
-        # 如果是单一路径，可以直接生成所有频繁模式
+
+    def get_prefix_path(self):
+        """
+        Decompose FP-tree into single prefix-path P and multipath Q parts
+        Returns: (list of (item_name, support), subtree with branching node as root)
+        """
+        prefix_items = []  # Store (item_name, support) pairs
         current = self.root
-        while current.children:
-            if len(current.children) > 1:
-                return False
-            current = list(current.children.values())[0]
-        return True
         
-    def get_single_path(self):
-        # 获取单一路径上的所有节点
-        path = []
-        current = self.root
-        while current.children:
-            current = list(current.children.values())[0]
-            path.append(current)
-        return path
+        # Find first branching node and collect prefix items
+        while len(current.children) == 1:
+            child = list(current.children.values())[0]
+            prefix_items.append((child.item_name, child.count))
+            current = child
+        
+        # If single prefix-path exists
+        if prefix_items:
+            # Create deep copy of tree for multipath part Q
+            multipath_tree = deepcopy(self)
+            
+            # Set branching node as root and reset its properties
+            current_multi = multipath_tree.root
+            for _ in range(len(prefix_items)):
+                current_multi = list(current_multi.children.values())[0]
+            multipath_tree.root = current_multi
+            multipath_tree.root.item_name = "null"
+            multipath_tree.root.count = 0
+            multipath_tree.root.parent = None
+
+            # Update header table for multipath part Q
+            prefix_item_names = {item for item, _ in prefix_items}
+            multipath_tree.header_table.header_table = {
+                item: info for item, info in multipath_tree.header_table.header_table.items()
+                if item not in prefix_item_names
+            }
+            
+            return prefix_items, multipath_tree
+        
+        # If no single prefix-path exists, return original tree
+        return None, self
+
+def mine_single_prefix_path(prefix_items):
+    """
+    Mine frequent patterns from single prefix-path items
+    Generate all combinations of items and use branching node support as pattern support
+    
+    Args:
+        prefix_items: list of (item_name, support) pairs from prefix path
+    """
+    patterns = []
+    # Generate all combinations of items
+    for i in range(1, len(prefix_items) + 1):
+        for comb in combinations(prefix_items, i):
+            # Get item names and minimum support from combination
+            pattern_items = [item for item, _ in comb]
+            min_support = min(support for _, support in comb)
+            patterns.append((pattern_items, min_support))
+    return patterns
+
 
 def get_conditional_pattern_base(header_table, item):
-    # 从树的底部逐个item获取条件模式基
+    """
+    Extract conditional pattern base for an item
+    Returns patterns in format like {(fcam:2), (cb:1)}
+    """
     patterns = []
-    # 当前item的链表的第一个节点
     node = header_table.header_table[item][1]
     
-    # 遍历当前item的链表的所有节点
     while node:
-        path = []
-        # 一个条件模式基的路径的支持度是当前叶子节点item的支持度
-        support = node.count
+        # Get prefix path excluding the item itself
+        prefix = []
         current = node.parent
         while current.item_name != "null":
-            path.append(current.item_name)
+            prefix.append(current.item_name)
             current = current.parent
-        if path:
-            path.reverse()
-            patterns.append((path, support))
+            
+        if prefix:
+            # Store pattern as (prefix_string, support)
+            # prefix is reversed to maintain correct order
+            prefix.reverse()
+            pattern_str = ''.join(prefix)  # Convert path to string format
+            patterns.append((pattern_str, node.count))
         node = node.node_link
         
     return patterns
 
 def construct_conditional_fptree(patterns, min_sup, original_order):
-    # 由对应item的条件模式基构建频繁子树
+    """
+    Construct conditional FP-tree from conditional pattern base
+    Input patterns format: {(fcam:2), (cb:1)}
+    """
+    # Convert patterns to transaction format
+    transactions = []
+    for pattern_str, count in patterns:
+        # Convert pattern string to list of items
+        transaction = list(pattern_str)
+        # Add same transaction multiple times based on count
+        transactions.extend([transaction] * count)
+    
+    # Create and build conditional FP-tree
     cond_tree = FPTree()
     
-    # 统计每个项的支持度
+    # Count item frequencies in expanded transactions
     item_count = {}
-    for pattern, count in patterns:
-        for item in pattern:
-            item_count[item] = item_count.get(item, 0) + count
+    for trans in transactions:
+        for item in trans:
+            item_count[item] = item_count.get(item, 0) + 1
             
-    # 过滤非频繁项
+    # Filter infrequent items
     frequent_items = {k: v for k, v in item_count.items() if v >= min_sup}
     
-    # 继承原始FP树中1频繁项集的顺序
+    # Inherit item order from original FP-tree
     cond_tree.header_table.item_order = original_order
 
+    # Initialize header table
     for item, count in frequent_items.items():
         cond_tree.header_table.increment_support(item, count)
-    
 
-    for pattern, count in patterns:
-        filtered_pattern = [item for item in pattern if item in frequent_items]
-        # 按原始FP树中1频繁项集的顺序排序
-        filtered_pattern.sort(key=lambda x: original_order[x])
-        if filtered_pattern:
-            cond_tree.insert_tree(filtered_pattern, cond_tree.root, count)
+    # Insert each transaction into conditional FP-tree
+    for transaction in transactions:
+        # Filter infrequent items and sort by original order
+        filtered_trans = [item for item in transaction if item in frequent_items]
+        filtered_trans.sort(key=lambda x: original_order[x])
+        if filtered_trans:
+            cond_tree.insert_tree(filtered_trans, cond_tree.root, 1) 
             
     return cond_tree
 
+
 def fp_growth(tree, alpha, min_sup):
-    """FP-Growth算法主函数"""
+    """
+    FP-Growth algorithm main function
+    Decompose FP-tree into single prefix-path P and multipath Q parts
+    Final result: freq_pattern_set(P) ∪ freq_pattern_set(Q) ∪ (freq_pattern_set(P) × freq_pattern_set(Q))
+    
+    Args:
+        tree: Current FP-tree being processed
+        alpha: Current item prefix
+        min_sup: Minimum support threshold
+    """
     patterns = []
     
-    if tree.has_single_path():
-        path_nodes = tree.get_single_path()
-        # FP子树是单一路径，直接挖掘所有频繁模式
-        for i in range(1, len(path_nodes) + 1):
-            for comb in combinations(path_nodes, i):
-                min_support = min(node.count for node in comb)
-                pattern_items = [node.item_name for node in comb] + alpha
-                patterns.append((pattern_items, min_support))
+    # Decompose FP-tree into single prefix-path P and multipath Q
+    prefix_path, multipath_tree = tree.get_prefix_path()
+    
+    if prefix_path:
+        # 1. Process single prefix-path part P
+        prefix_patterns = mine_single_prefix_path(prefix_path)
+        
+        # 2. Process multipath part Q (if exists)
+        if multipath_tree.root.children:
+            multipath_patterns = []
+            header_table = multipath_tree.header_table.header_table
+            # Process items in order of original FP-tree
+            items = sorted(header_table.keys(), 
+                         key=lambda x: -multipath_tree.header_table.item_order[x])
+            
+            # Build conditional pattern-base and conditional FP-tree for each item in Q
+            for item in items:
+                new_alpha = [item] + alpha
+                support = header_table[item][0]
+                multipath_patterns.append((new_alpha, support))
+                
+                # Build item's conditional pattern-base
+                cond_patterns = get_conditional_pattern_base(multipath_tree.header_table, item)
+                # Build item's conditional FP-tree
+                cond_tree = construct_conditional_fptree(cond_patterns, min_sup, 
+                                                       multipath_tree.header_table.item_order)
+                
+                # Recursively process conditional FP-tree
+                if cond_tree.root.children:
+                    multipath_patterns.extend(fp_growth(cond_tree, new_alpha, min_sup))
+            
+            # 3. Merge results from P and Q:
+            # a) Add patterns from P
+            patterns.extend([(p[0] + alpha, p[1]) for p in prefix_patterns])
+            # b) Add patterns from Q
+            patterns.extend(multipath_patterns)
+            # c) Add combined patterns (P × Q)
+            for p_pattern, p_support in prefix_patterns:
+                for q_pattern, q_support in multipath_patterns:
+                    combined_pattern = p_pattern + q_pattern
+                    combined_support = min(p_support, q_support)
+                    patterns.append((combined_pattern + alpha, combined_support))
+        else:
+            # If Q is empty, return only patterns from P
+            patterns.extend([(p[0] + alpha, p[1]) for p in prefix_patterns])
+            
     else:
-        # 按原始FP树中1频繁项集的顺序
-        # 支持度从低到高遍历所有项
+        # If no single prefix-path exists, use standard FP-Growth processing
         header_table = tree.header_table.header_table
         items = sorted(header_table.keys(), 
                       key=lambda x: tree.header_table.item_order[x])
                       
         for item in items:
-            # alpha 已经遍历过的item前缀
             new_alpha = [item] + alpha
-            # item在当前FP子树中的支持度
             support = header_table[item][0]
             patterns.append((new_alpha, support))
             
-            # 获取当前item的条件模式基
+            # Build conditional pattern-base and conditional FP-tree
             cond_patterns = get_conditional_pattern_base(tree.header_table, item)
-            # 由item的条件模式基构建频繁子树
-            cond_tree = construct_conditional_fptree(cond_patterns, min_sup, tree.header_table.item_order)
+            cond_tree = construct_conditional_fptree(cond_patterns, min_sup, 
+                                                   tree.header_table.item_order)
             
-            # 如果频繁子树不为空，递归挖掘频繁模式
+            # Recursively process conditional FP-tree
             if cond_tree.root.children:
                 patterns.extend(fp_growth(cond_tree, new_alpha, min_sup))
                 
     return patterns
 
 def mine_fptree(transactions, min_sup):
-
+    """
+    Main function to mine frequent patterns using FP-Growth algorithm
+    
+    Args:
+        transactions: list of transactions
+        min_sup: minimum support threshold
+        
+    Returns:
+        list of tuples (pattern, support)
+    """
     fp_tree = FPTree()
-    # 通过两次遍历构建初始FP树
+    # construct initial FP-tree with two database scans
     fp_tree.create_tree(transactions, min_sup)
 
     if not fp_tree.root.children:
         return []
-            # 递归挖掘FP树的频繁模式
+    # recursively mine frequent patterns from FP-tree
     return fp_growth(fp_tree, [], min_sup)
 
-# 测试代码
-if __name__ == "__main__":
 
-    # 示例数据
-    
+if __name__ == "__main__":
+    # example transaction database
     transactions = [
         ['A', 'B'],
         ['B', 'C', 'D'],
@@ -241,10 +351,42 @@ if __name__ == "__main__":
     #     ['I1', 'I2', 'I3', 'I5'],
     #     ['I1', 'I2', 'I3']
     # ]
-    min_sup = 2
+
+    # transactions = [
+    #     ['a', 'b', 'c'],
+    #     ['a', 'b', 'c'],
+    #     ['a', 'b', 'd'],
+    #     ['a', 'b', 'e']
+    # ]
+
+    # transactions = [
+    #     ['M','O','N','K','E','Y'], 
+    #     ['D','O','N','K','E','Y'], 
+    #     ['M','A','K','E'], 
+    #     ['M','U','C','K','Y'], 
+    #     ['C','O','O','K','I','E']
+    #     ]
+
+
+    # transactions = [
+    #     ['a', 'b', 'c', 'e'],
+    #     ['a', 'b', 'c', 'e'],
+    #     ['a', 'b', 'c', 'd', 'f'],
+    #     ['a', 'b', 'c', 'd', 'f'],
+    #     ['a', 'b', 'c', 'd', 'f'],
+    #     ['a', 'b', 'c', 'd', 'e'],
+    #     ['a', 'b', 'c'],
+    #     ['a', 'b'],
+    #     ['a'],
+    #     ['a']
+    # ]
+
+    min_sup = 4
     
     patterns = mine_fptree(transactions, min_sup)
-    
-    print("频繁模式及其支持度:")
+    # print(patterns)
+
+
+    print("Frequent patterns with support:")
     for pattern, support in sorted(patterns, key=lambda x: (-x[1], x[0])):
         print(f"{pattern}: {support}")
