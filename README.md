@@ -1,1 +1,1 @@
-# FP-Growth-Implementaion-with-Python
+# An Implementation of FP-Growth Algorithm with Python
